@@ -1,13 +1,14 @@
-import collections
-import HydrusConstants as HC
 import ClientCaches
 import ClientData
 import ClientConstants as CC
 import ClientGUIMenus
 import ClientRatings
-import itertools
+import ClientThreading
+import HydrusConstants as HC
+import HydrusData
+import HydrusExceptions
+import HydrusGlobals
 import os
-import random
 import sys
 import threading
 import time
@@ -18,10 +19,6 @@ import wx.richtext
 import wx.lib.newevent
 from wx.lib.mixins.listctrl import ListCtrlAutoWidthMixin
 from wx.lib.mixins.listctrl import ColumnSorterMixin
-import HydrusTags
-import HydrusData
-import HydrusExceptions
-import HydrusGlobals
 
 TEXT_CUTOFF = 1024
 
@@ -168,7 +165,7 @@ class BetterButton( wx.Button ):
     
     def __init__( self, parent, label, func, *args, **kwargs ):
         
-        wx.Button.__init__( self, parent, label = label )
+        wx.Button.__init__( self, parent, label = label, style = wx.BU_EXACTFIT )
         
         self._func = func
         self._args = args
@@ -506,116 +503,6 @@ class ChoiceSort( BetterChoice ):
         if self._page_key is not None: self._BroadcastSort()
         
     
-class EditStringToStringDict( wx.Panel ):
-    
-    def __init__( self, parent, initial_dict ):
-        
-        wx.Panel.__init__( self, parent )
-        
-        self._listctrl = SaneListCtrl( self, 120, [ ( 'key', 200 ), ( 'value', -1 ) ], delete_key_callback = self.Delete, activation_callback = self.Edit )
-        
-        self._add = BetterButton( self, 'add', self.Add )
-        self._edit = BetterButton( self, 'edit', self.Edit )
-        self._delete = BetterButton( self, 'delete', self.Delete )
-        
-        #
-        
-        for display_tuple in initial_dict.items():
-            
-            self._listctrl.Append( display_tuple, display_tuple )
-            
-        
-        #
-        
-        button_hbox = wx.BoxSizer( wx.HORIZONTAL )
-        
-        button_hbox.AddF( self._add, CC.FLAGS_VCENTER )
-        button_hbox.AddF( self._edit, CC.FLAGS_VCENTER )
-        button_hbox.AddF( self._delete, CC.FLAGS_VCENTER )
-        
-        vbox = wx.BoxSizer( wx.VERTICAL )
-        
-        vbox.AddF( self._listctrl, CC.FLAGS_EXPAND_BOTH_WAYS )
-        vbox.AddF( button_hbox, CC.FLAGS_BUTTON_SIZER )
-        
-        self.SetSizer( vbox )
-        
-    
-    def Add( self ):
-        
-        import ClientGUIDialogs
-        
-        with ClientGUIDialogs.DialogTextEntry( self, 'enter the key', allow_blank = False ) as dlg:
-            
-            if dlg.ShowModal() == wx.ID_OK:
-                
-                key = dlg.GetValue()
-                
-                with ClientGUIDialogs.DialogTextEntry( self, 'enter the value', allow_blank = True ) as dlg:
-                    
-                    if dlg.ShowModal() == wx.ID_OK:
-                        
-                        value = dlg.GetValue()
-                        
-                        display_tuple = ( key, value )
-                        
-                        self._listctrl.Append( display_tuple, display_tuple )
-                        
-                    
-                
-            
-        
-    
-    def Delete( self ):
-        
-        self._listctrl.RemoveAllSelected()
-        
-    
-    def Edit( self ):
-        
-        for i in self._listctrl.GetAllSelected():
-            
-            ( key, value ) = self._listctrl.GetClientData( i )
-            
-            import ClientGUIDialogs
-            
-            with ClientGUIDialogs.DialogTextEntry( self, 'edit the key', default = key, allow_blank = False ) as dlg:
-                
-                if dlg.ShowModal() == wx.ID_OK:
-                    
-                    key = dlg.GetValue()
-                    
-                else:
-                    
-                    return
-                    
-                
-            
-            with ClientGUIDialogs.DialogTextEntry( self, 'edit the value', default = value, allow_blank = True ) as dlg:
-                
-                if dlg.ShowModal() == wx.ID_OK:
-                    
-                    value = dlg.GetValue()
-                    
-                else:
-                    
-                    return
-                    
-                
-            
-            display_tuple = ( key, value )
-            
-            self._listctrl.UpdateRow( i, display_tuple, display_tuple )
-            
-        
-    
-    def GetValue( self ):
-        
-        value_dict = { key : value for ( key, value ) in self._listctrl.GetClientData() }
-        
-        return value_dict
-        
-    
 class ExportPatternButton( wx.Button ):
     
     ID_HASH = 0
@@ -641,8 +528,8 @@ class ExportPatternButton( wx.Button ):
         if id == self.ID_HASH: phrase = '{hash}'
         if id == self.ID_TAGS: phrase = '{tags}'
         if id == self.ID_NN_TAGS: phrase = '{nn tags}'
-        if id == self.ID_NAMESPACE: phrase = '[...]'
-        if id == self.ID_TAG: phrase = '(...)'
+        if id == self.ID_NAMESPACE: phrase = u'[\u2026]'
+        if id == self.ID_TAG: phrase = u'(\u2026)'
         else: event.Skip()
         
         if phrase is not None: HydrusGlobals.client_controller.pub( 'clipboard', 'text', phrase )
@@ -654,19 +541,19 @@ class ExportPatternButton( wx.Button ):
         
         menu.Append( -1, 'click on a phrase to copy to clipboard' )
         
-        menu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( menu )
         
         menu.Append( self.ID_HASH, 'the file\'s hash - {hash}' )
         menu.Append( self.ID_TAGS, 'all the file\'s tags - {tags}' )
         menu.Append( self.ID_NN_TAGS, 'all the file\'s non-namespaced tags - {nn tags}' )
         
-        menu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( menu )
         
-        menu.Append( self.ID_NAMESPACE, 'all instances of a particular namespace - [...]' )
+        menu.Append( self.ID_NAMESPACE, u'all instances of a particular namespace - [\u2026]' )
         
-        menu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( menu )
         
-        menu.Append( self.ID_TAG, 'a particular tag, if the file has it - (...)' )
+        menu.Append( self.ID_TAG, u'a particular tag, if the file has it - (\u2026)' )
         
         HydrusGlobals.client_controller.PopupMenu( self, menu )
         
@@ -1090,6 +977,11 @@ class ListBook( wx.Panel ):
         raise Exception( 'That page not found!' )
         
     
+    def GetPageCount( self ):
+        
+        return len( self._keys_to_active_pages ) + len( self._keys_to_proto_pages )
+        
+    
     def KeyExists( self, key ):
         
         return key in self._keys_to_active_pages or key in self._keys_to_proto_pages
@@ -1206,6 +1098,61 @@ class ListCtrlAutoWidth( wx.ListCtrl, ListCtrlAutoWidthMixin ):
         for index in indices: self.DeleteItem( index )
         
     
+class CheckboxManager( object ):
+    
+    def GetCurrentValue( self ):
+        
+        raise NotImplementedError()
+        
+    
+    def Invert( self ):
+        
+        raise NotImplementedError()
+        
+    
+class CheckboxManagerCalls( CheckboxManager ):
+    
+    def __init__( self, invert_call, value_call ):
+        
+        CheckboxManager.__init__( self )
+        
+        self._invert_call = invert_call
+        self._value_call = value_call
+        
+    
+    def GetCurrentValue( self ):
+        
+        return self._value_call()
+        
+    
+    def Invert( self ):
+        
+        self._invert_call()
+        
+    
+class CheckboxManagerOptions( CheckboxManager ):
+    
+    def __init__( self, boolean_name ):
+        
+        CheckboxManager.__init__( self )
+        
+        self._boolean_name = boolean_name
+        
+    
+    def GetCurrentValue( self ):
+        
+        new_options = HydrusGlobals.client_controller.GetNewOptions()
+        
+        return new_options.GetBoolean( self._boolean_name )
+        
+    
+    def Invert( self ):
+        
+        new_options = HydrusGlobals.client_controller.GetNewOptions()
+        
+        new_options.InvertBoolean( self._boolean_name )
+        
+    
 class MenuBitmapButton( BetterBitmapButton ):
     
     def __init__( self, parent, bitmap, menu_items ):
@@ -1213,13 +1160,6 @@ class MenuBitmapButton( BetterBitmapButton ):
         BetterBitmapButton.__init__( self, parent, bitmap, self.DoMenu )
         
         self._menu_items = menu_items
-        
-    
-    def _DoBooloanCheck( self, boolean_name ):
-        
-        new_options = HydrusGlobals.client_controller.GetNewOptions()
-        
-        new_options.InvertBoolean( boolean_name )
         
     
     def DoMenu( self ):
@@ -1230,23 +1170,22 @@ class MenuBitmapButton( BetterBitmapButton ):
             
             if item_type == 'normal':
                 
-                callable = data
+                func = data
                 
-                ClientGUIMenus.AppendMenuItem( self, menu, title, description, callable )
+                ClientGUIMenus.AppendMenuItem( self, menu, title, description, func )
                 
             elif item_type == 'check':
                 
-                new_options = HydrusGlobals.client_controller.GetNewOptions()
+                check_manager = data
                 
-                boolean_name = data
+                current_value = check_manager.GetCurrentValue()
+                func = check_manager.Invert
                 
-                initial_value = new_options.GetBoolean( boolean_name )
-                
-                ClientGUIMenus.AppendMenuCheckItem( self, menu, title, description, initial_value, self._DoBooloanCheck, boolean_name )
+                ClientGUIMenus.AppendMenuCheckItem( self, menu, title, description, current_value, func )
                 
             elif item_type == 'separator':
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
                 
             
         
@@ -1262,13 +1201,6 @@ class MenuButton( BetterButton ):
         self._menu_items = menu_items
         
     
-    def _DoBooloanCheck( self, boolean_name ):
-        
-        new_options = HydrusGlobals.client_controller.GetNewOptions()
-        
-        new_options.InvertBoolean( boolean_name )
-        
-    
     def DoMenu( self ):
         
         menu = wx.Menu()
@@ -1283,26 +1215,33 @@ class MenuButton( BetterButton ):
                 
             elif item_type == 'check':
                 
-                new_options = HydrusGlobals.client_controller.GetNewOptions()
+                check_manager = data
                 
-                boolean_name = data
+                initial_value = check_manager.GetInitialValue()
                 
-                initial_value = new_options.GetBoolean( boolean_name )
-                
-                ClientGUIMenus.AppendMenuCheckItem( self, menu, title, description, initial_value, self._DoBooloanCheck, boolean_name )
+                ClientGUIMenus.AppendMenuCheckItem( self, menu, title, description, initial_value, check_manager.Invert )
                 
             elif item_type == 'separator':
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
+                
+            elif item_type == 'label':
+                
+                ClientGUIMenus.AppendMenuLabel( menu, title, description )
                 
             
         
         HydrusGlobals.client_controller.PopupMenu( self, menu )
         
     
+    def SetMenuItems( self, menu_items ):
+        
+        self._menu_items = menu_items
+        
+    
 class NoneableSpinCtrl( wx.Panel ):
     
-    def __init__( self, parent, message, none_phrase = 'no limit', min = 0, max = 1000000, unit = None, multiplier = 1, num_dimensions = 1 ):
+    def __init__( self, parent, message = '', none_phrase = 'no limit', min = 0, max = 1000000, unit = None, multiplier = 1, num_dimensions = 1 ):
         
         wx.Panel.__init__( self, parent )
         
@@ -1524,6 +1463,8 @@ class PopupDismissAll( PopupWindow ):
     
 class PopupMessage( PopupWindow ):
     
+    WRAP_WIDTH = 400
+    
     def __init__( self, parent, job_key ):
         
         PopupWindow.__init__( self, parent )
@@ -1537,20 +1478,20 @@ class PopupMessage( PopupWindow ):
         self._title.Hide()
         
         self._text_1 = FitResistantStaticText( self )
-        self._text_1.Wrap( 380 )
+        self._text_1.Wrap( self.WRAP_WIDTH )
         self._text_1.Bind( wx.EVT_RIGHT_DOWN, self.EventDismiss )
         self._text_1.Hide()
         
-        self._gauge_1 = Gauge( self, size = ( 380, -1 ) )
+        self._gauge_1 = Gauge( self, size = ( self.WRAP_WIDTH, -1 ) )
         self._gauge_1.Bind( wx.EVT_RIGHT_DOWN, self.EventDismiss )
         self._gauge_1.Hide()
         
         self._text_2 = FitResistantStaticText( self )
-        self._text_2.Wrap( 380 )
+        self._text_2.Wrap( self.WRAP_WIDTH )
         self._text_2.Bind( wx.EVT_RIGHT_DOWN, self.EventDismiss )
         self._text_2.Hide()
         
-        self._gauge_2 = Gauge( self, size = ( 380, -1 ) )
+        self._gauge_2 = Gauge( self, size = ( self.WRAP_WIDTH, -1 ) )
         self._gauge_2.Bind( wx.EVT_RIGHT_DOWN, self.EventDismiss )
         self._gauge_2.Hide()
         
@@ -1571,7 +1512,7 @@ class PopupMessage( PopupWindow ):
         self._show_tb_button.Hide()
         
         self._tb_text = FitResistantStaticText( self )
-        self._tb_text.Wrap( 380 )
+        self._tb_text.Wrap( self.WRAP_WIDTH )
         self._tb_text.Bind( wx.EVT_RIGHT_DOWN, self.EventDismiss )
         self._tb_text.Hide()
         
@@ -1967,6 +1908,18 @@ class PopupMessageManager( wx.Frame ):
         
         self._timer.Start( 500, wx.TIMER_CONTINUOUS )
         
+        job_key = ClientThreading.JobKey()
+        
+        job_key.SetVariable( 'popup_text_1', u'initialising popup message manager\u2026' )
+        
+        wx.CallAfter( self.AddMessage, job_key )
+        
+        wx.CallAfter( self._Update )
+        
+        wx.CallAfter( job_key.Delete )
+        
+        wx.CallAfter( self._Update )
+        
     
     def _CheckPending( self ):
         
@@ -2057,11 +2010,23 @@ class PopupMessageManager( wx.Frame ):
             
             current_focus_tlp = wx.GetTopLevelParent( wx.Window.FindFocus() )
             
-            gui_is_active = current_focus_tlp in ( self, parent )
+            main_gui_is_active = current_focus_tlp in ( self, parent )
+            
+            on_top_frame_is_active = False
+            
+            if not main_gui_is_active:
+                
+                c_f_tlp_is_child_frame_of_main_gui = isinstance( current_focus_tlp, wx.Frame ) and current_focus_tlp.GetParent() == parent
+                
+                if c_f_tlp_is_child_frame_of_main_gui and current_focus_tlp.GetWindowStyle() & wx.FRAME_FLOAT_ON_PARENT == wx.FRAME_FLOAT_ON_PARENT:
+                    
+                    on_top_frame_is_active = True
+                    
+                
             
             if new_options.GetBoolean( 'hide_message_manager_on_gui_deactive' ):
                 
-                if gui_is_active:
+                if main_gui_is_active:
                     
                     # gui can have focus even while minimised to the taskbar--let's not show in this case
                     if not self.IsShown() and parent.IsIconized():
@@ -2109,7 +2074,7 @@ class PopupMessageManager( wx.Frame ):
                     
                 
                 # Unhiding tends to raise the main gui tlp, which is annoying if a media viewer window has focus
-                show_is_not_annoying = gui_is_active or self._DisplayingError()
+                show_is_not_annoying = main_gui_is_active or on_top_frame_is_active or self._DisplayingError()
                 
                 ok_to_show = show_is_not_annoying and not going_to_bug_out_at_hide_or_show
                 
@@ -2149,6 +2114,38 @@ class PopupMessageManager( wx.Frame ):
             
             self.Destroy()
             
+        
+    
+    def _Update( self ):
+        
+        if HydrusGlobals.view_shutdown:
+            
+            self._timer.Stop()
+            
+            self.Destroy()
+            
+            return
+            
+        
+        sizer_items = self._message_vbox.GetChildren()
+        
+        for sizer_item in sizer_items:
+            
+            message_window = sizer_item.GetWindow()
+            
+            if message_window.IsDeleted():
+                
+                message_window.TryToDismiss()
+                
+                break
+                
+            else:
+                
+                message_window.Update()
+                
+            
+        
+        self._SizeAndPositionAndShow()
         
     
     def AddMessage( self, job_key ):
@@ -2238,34 +2235,7 @@ class PopupMessageManager( wx.Frame ):
         
         try:
             
-            if HydrusGlobals.view_shutdown:
-                
-                self._timer.Stop()
-                
-                self.Destroy()
-                
-                return
-                
-            
-            sizer_items = self._message_vbox.GetChildren()
-            
-            for sizer_item in sizer_items:
-                
-                message_window = sizer_item.GetWindow()
-                
-                if message_window.IsDeleted():
-                    
-                    message_window.TryToDismiss()
-                    
-                    break
-                    
-                else:
-                    
-                    message_window.Update()
-                    
-                
-            
-            self._SizeAndPositionAndShow()
+            self._Update()
             
         except wx.PyDeadObjectError:
             
@@ -2511,8 +2481,8 @@ class RatingNumerical( wx.Window ):
         
         self._service = HydrusGlobals.client_controller.GetServicesManager().GetService( self._service_key )
         
-        self._num_stars = self._service.GetInfo( 'num_stars' )
-        self._allow_zero = self._service.GetInfo( 'allow_zero' )
+        self._num_stars = self._service.GetNumStars()
+        self._allow_zero = self._service.AllowZero()
         
         my_width = ClientRatings.GetNumericalWidth( self._service_key )
         
@@ -2830,7 +2800,7 @@ class RegexButton( wx.Button ):
         
         menu.Append( -1, 'click on a phrase to copy to clipboard' )
         
-        menu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( menu )
         
         submenu = wx.Menu()
         
@@ -2841,10 +2811,10 @@ class RegexButton( wx.Button ):
         submenu.Append( self.ID_REGEX_BACKSPACE, r'backspace character - \\' )
         submenu.Append( self.ID_REGEX_BEGINNING, r'beginning of line - ^' )
         submenu.Append( self.ID_REGEX_END, r'end of line - $' )
-        submenu.Append( self.ID_REGEX_SET, r'any of these - [...]' )
-        submenu.Append( self.ID_REGEX_NOT_SET, r'anything other than these - [^...]' )
+        submenu.Append( self.ID_REGEX_SET, u'any of these - [\u2026]' )
+        submenu.Append( self.ID_REGEX_NOT_SET, u'anything other than these - [^\u2026]' )
         
-        submenu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( submenu )
         
         submenu.Append( self.ID_REGEX_0_OR_MORE_GREEDY, r'0 or more matches, consuming as many as possible - *' )
         submenu.Append( self.ID_REGEX_1_OR_MORE_GREEDY, r'1 or more matches, consuming as many as possible - +' )
@@ -2856,17 +2826,17 @@ class RegexButton( wx.Button ):
         submenu.Append( self.ID_REGEX_M_TO_N_GREEDY, r'm to n matches, consuming as many as possible - {m,n}' )
         submenu.Append( self.ID_REGEX_M_TO_N_MINIMAL, r'm to n matches, consuming as few as possible - {m,n}?' )
         
-        submenu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( submenu )
         
-        submenu.Append( self.ID_REGEX_LOOKAHEAD, r'the next characters are: (non-consuming) - (?=...)' )
-        submenu.Append( self.ID_REGEX_NEGATIVE_LOOKAHEAD, r'the next characters are not: (non-consuming) - (?!...)' )
-        submenu.Append( self.ID_REGEX_LOOKBEHIND, r'the previous characters are: (non-consuming) - (?<=...)' )
-        submenu.Append( self.ID_REGEX_NEGATIVE_LOOKBEHIND, r'the previous characters are not: (non-consuming) - (?<!...)' )
+        submenu.Append( self.ID_REGEX_LOOKAHEAD, u'the next characters are: (non-consuming) - (?=\u2026)' )
+        submenu.Append( self.ID_REGEX_NEGATIVE_LOOKAHEAD, u'the next characters are not: (non-consuming) - (?!\u2026)' )
+        submenu.Append( self.ID_REGEX_LOOKBEHIND, u'the previous characters are: (non-consuming) - (?<=\u2026)' )
+        submenu.Append( self.ID_REGEX_NEGATIVE_LOOKBEHIND, u'the previous characters are not: (non-consuming) - (?<!\u2026)' )
         
-        submenu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( submenu )
         
         submenu.Append( self.ID_REGEX_NUMBER_WITHOUT_ZEROES, r'0074 -> 74 - [1-9]+\d*' )
-        submenu.Append( self.ID_REGEX_FILENAME, r'filename - (?<=' + os.path.sep.encode( 'string_escape' ) + r')[^' + os.path.sep.encode( 'string_escape' ) + ']*?(?=\..*$)' )
+        submenu.Append( self.ID_REGEX_FILENAME, r'filename - (?<=' + os.path.sep.encode( 'string_escape' ) + r')[^' + os.path.sep.encode( 'string_escape' ) + r']*?(?=\..*$)' )
         
         menu.AppendMenu( -1, 'regex components', submenu )
         
@@ -2874,7 +2844,7 @@ class RegexButton( wx.Button ):
         
         submenu.Append( self.ID_REGEX_MANAGE_FAVOURITES, 'manage favourites' )
         
-        submenu.AppendSeparator()
+        ClientGUIMenus.AppendSeparator( submenu )
         
         for ( index, ( regex_phrase, description ) ) in enumerate( HC.options[ 'regex_favourites' ] ):
             
@@ -2901,8 +2871,8 @@ class RegexButton( wx.Button ):
         elif id == self.ID_REGEX_BACKSPACE: phrase = r'\\'
         elif id == self.ID_REGEX_BEGINNING: phrase = r'^'
         elif id == self.ID_REGEX_END: phrase = r'$'
-        elif id == self.ID_REGEX_SET: phrase = r'[...]'
-        elif id == self.ID_REGEX_NOT_SET: phrase = r'[^...]'
+        elif id == self.ID_REGEX_SET: phrase = u'[\u2026]'
+        elif id == self.ID_REGEX_NOT_SET: phrase = u'[^\u2026]'
         elif id == self.ID_REGEX_0_OR_MORE_GREEDY: phrase = r'*'
         elif id == self.ID_REGEX_1_OR_MORE_GREEDY: phrase = r'+'
         elif id == self.ID_REGEX_0_OR_1_GREEDY: phrase = r'?'
@@ -2912,12 +2882,12 @@ class RegexButton( wx.Button ):
         elif id == self.ID_REGEX_EXACTLY_M: phrase = r'{m}'
         elif id == self.ID_REGEX_M_TO_N_GREEDY: phrase = r'{m,n}'
         elif id == self.ID_REGEX_M_TO_N_MINIMAL: phrase = r'{m,n}?'
-        elif id == self.ID_REGEX_LOOKAHEAD: phrase = r'(?=...)'
-        elif id == self.ID_REGEX_NEGATIVE_LOOKAHEAD: phrase = r'(?!...)'
-        elif id == self.ID_REGEX_LOOKBEHIND: phrase = r'(?<=...)'
-        elif id == self.ID_REGEX_NEGATIVE_LOOKBEHIND: phrase = r'(?<!...)'
+        elif id == self.ID_REGEX_LOOKAHEAD: phrase = u'(?=\u2026)'
+        elif id == self.ID_REGEX_NEGATIVE_LOOKAHEAD: phrase = u'(?!\u2026)'
+        elif id == self.ID_REGEX_LOOKBEHIND: phrase = u'(?<=\u2026)'
+        elif id == self.ID_REGEX_NEGATIVE_LOOKBEHIND: phrase = u'(?<!\u2026)'
         elif id == self.ID_REGEX_NUMBER_WITHOUT_ZEROES: phrase = r'[1-9]+\d*'
-        elif id == self.ID_REGEX_FILENAME: phrase = '(?<=' + os.path.sep.encode( 'string_escape' ) + r')[^' + os.path.sep.encode( 'string_escape' ) + ']*?(?=\..*$)'
+        elif id == self.ID_REGEX_FILENAME: phrase = '(?<=' + os.path.sep.encode( 'string_escape' ) + r')[^' + os.path.sep.encode( 'string_escape' ) + r']*?(?=\..*$)'
         elif id == self.ID_REGEX_MANAGE_FAVOURITES:
             
             import ClientGUIDialogsManage
@@ -3215,6 +3185,13 @@ class SaneListCtrl( wx.ListCtrl, ListCtrlAutoWidthMixin, ColumnSorterMixin ):
         
         indices = self.GetAllSelected()
         
+        self.RemoveIndices( indices )
+        
+    
+    def RemoveIndices( self, indices ):
+        
+        indices.sort()
+        
         indices.reverse() # so we don't screw with the indices of deletees below
         
         for index in indices:
@@ -3360,161 +3337,6 @@ class SaneListCtrlForSingleObject( SaneListCtrl ):
         
         self._data_indices_to_objects[ data_index ] = obj
         self._objects_to_data_indices[ obj ] = data_index
-        
-    
-class SeedCacheControl( SaneListCtrlForSingleObject ):
-    
-    def __init__( self, parent, seed_cache ):
-        
-        height = 300
-        columns = [ ( 'source', -1 ), ( 'status', 90 ), ( 'added', 150 ), ( 'last modified', 150 ), ( 'note', 200 ) ]
-        
-        SaneListCtrlForSingleObject.__init__( self, parent, height, columns )
-        
-        self._seed_cache = seed_cache
-        
-        for seed in self._seed_cache.GetSeeds():
-            
-            self._AddSeed( seed )
-            
-        
-        self.Bind( wx.EVT_MENU, self.EventMenu )
-        self.Bind( wx.EVT_RIGHT_DOWN, self.EventShowMenu )
-        
-        HydrusGlobals.client_controller.sub( self, 'NotifySeedUpdated', 'seed_cache_seed_updated' )
-        
-    
-    def _AddSeed( self, seed ):
-        
-        sort_tuple = self._seed_cache.GetSeedInfo( seed )
-        
-        ( display_tuple, sort_tuple ) = self._GetListCtrlTuples( seed )
-        
-        self.Append( display_tuple, sort_tuple, seed )
-        
-    
-    def _GetListCtrlTuples( self, seed ):
-        
-        sort_tuple = self._seed_cache.GetSeedInfo( seed )
-        
-        ( seed, status, added_timestamp, last_modified_timestamp, note ) = sort_tuple
-        
-        pretty_seed = HydrusData.ToUnicode( seed )
-        pretty_status = CC.status_string_lookup[ status ]
-        pretty_added = HydrusData.ConvertTimestampToPrettyAgo( added_timestamp )
-        pretty_modified = HydrusData.ConvertTimestampToPrettyAgo( last_modified_timestamp )
-        pretty_note = note.split( os.linesep )[0]
-        
-        display_tuple = ( pretty_seed, pretty_status, pretty_added, pretty_modified, pretty_note )
-        
-        return ( display_tuple, sort_tuple )
-        
-    
-    def _CopySelectedNotes( self ):
-        
-        notes = []
-        
-        for seed in self.GetObjects( only_selected = True ):
-            
-            ( seed, status, added_timestamp, last_modified_timestamp, note ) = self._seed_cache.GetSeedInfo( seed )
-            
-            if note != '':
-                
-                notes.append( note )
-                
-            
-        
-        if len( notes ) > 0:
-            
-            separator = os.linesep * 2
-            
-            text = separator.join( notes )
-            
-            HydrusGlobals.client_controller.pub( 'clipboard', 'text', text )
-            
-        
-    
-    def _CopySelectedSeeds( self ):
-        
-        seeds = self.GetObjects( only_selected = True )
-        
-        if len( seeds ) > 0:
-            
-            separator = os.linesep * 2
-            
-            text = separator.join( seeds )
-            
-            HydrusGlobals.client_controller.pub( 'clipboard', 'text', text )
-            
-        
-    
-    def _SetSelected( self, status_to_set ):
-        
-        seeds_to_reset = self.GetObjects( only_selected = True )
-        
-        for seed in seeds_to_reset:
-            
-            self._seed_cache.UpdateSeedStatus( seed, status_to_set )
-            
-        
-    
-    def EventMenu( self, event ):
-        
-        action = ClientCaches.MENU_EVENT_ID_TO_ACTION_CACHE.GetAction( event.GetId() )
-        
-        if action is not None:
-            
-            ( command, data ) = action
-            
-            if command == 'copy_seed_notes': self._CopySelectedNotes()
-            elif command == 'copy_seeds': self._CopySelectedSeeds()
-            elif command == 'set_seed_unknown': self._SetSelected( CC.STATUS_UNKNOWN )
-            elif command == 'set_seed_skipped': self._SetSelected( CC.STATUS_SKIPPED )
-            else: event.Skip()
-            
-        
-    
-    def EventShowMenu( self, event ):
-        
-        menu = wx.Menu()
-        
-        menu.Append( ClientCaches.MENU_EVENT_ID_TO_ACTION_CACHE.GetTemporaryId( 'copy_seeds' ), 'copy sources' )
-        menu.Append( ClientCaches.MENU_EVENT_ID_TO_ACTION_CACHE.GetTemporaryId( 'copy_seed_notes' ), 'copy notes' )
-        
-        menu.AppendSeparator()
-        
-        menu.Append( ClientCaches.MENU_EVENT_ID_TO_ACTION_CACHE.GetTemporaryId( 'set_seed_skipped' ), 'skip' )
-        menu.Append( ClientCaches.MENU_EVENT_ID_TO_ACTION_CACHE.GetTemporaryId( 'set_seed_unknown' ), 'try again' )
-        
-        HydrusGlobals.client_controller.PopupMenu( self, menu )
-        
-    
-    def NotifySeedUpdated( self, seed ):
-        
-        if self._seed_cache.HasSeed( seed ):
-            
-            if self.HasObject( seed ):
-                
-                index = self.GetIndexFromObject( seed )
-                
-                ( display_tuple, sort_tuple ) = self._GetListCtrlTuples( seed )
-                
-                self.UpdateRow( index, display_tuple, sort_tuple, seed )
-                
-            else:
-                
-                self._AddSeed( seed )
-                
-            
-        else:
-            
-            if self.HasObject( seed ):
-                
-                index = self.GetIndexFromObject( seed )
-                
-                self.DeleteItem( index )
-                
-            
         
     
 class Shortcut( wx.TextCtrl ):
@@ -3768,7 +3590,7 @@ class ThreadToGUIUpdater( object ):
 
 class TimeDeltaButton( wx.Button ):
     
-    def __init__( self, parent, min = 1, days = False, hours = False, minutes = False, seconds = False ):
+    def __init__( self, parent, min = 1, days = False, hours = False, minutes = False, seconds = False, monthly_allowed = False ):
         
         wx.Button.__init__( self, parent )
         
@@ -3777,6 +3599,7 @@ class TimeDeltaButton( wx.Button ):
         self._show_hours = hours
         self._show_minutes = minutes
         self._show_seconds = seconds
+        self._monthly_allowed = monthly_allowed
         
         self._value = self._min
         
@@ -3791,51 +3614,58 @@ class TimeDeltaButton( wx.Button ):
         
         value = self._value
         
-        if self._show_days:
+        if value is None:
             
-            days = value / 86400
+            text = 'monthly'
             
-            if days > 0:
+        else:
+            
+            if self._show_days:
                 
-                text_components.append( HydrusData.ConvertIntToPrettyString( days ) + ' days' )
+                days = value / 86400
                 
-            
-            value %= 86400
-            
-        
-        if self._show_hours:
-            
-            hours = value / 3600
-            
-            if hours > 0:
+                if days > 0:
+                    
+                    text_components.append( HydrusData.ConvertIntToPrettyString( days ) + ' days' )
+                    
                 
-                text_components.append( HydrusData.ConvertIntToPrettyString( hours ) + ' hours' )
+                value %= 86400
                 
             
-            value %= 3600
-            
-        
-        if self._show_minutes:
-            
-            minutes = value / 60
-            
-            if minutes > 0:
+            if self._show_hours:
                 
-                text_components.append( HydrusData.ConvertIntToPrettyString( minutes ) + ' minutes' )
+                hours = value / 3600
                 
-            
-            value %= 60
-            
-        
-        if self._show_seconds:
-            
-            if value > 0 or len( text_components ) == 0:
+                if hours > 0:
+                    
+                    text_components.append( HydrusData.ConvertIntToPrettyString( hours ) + ' hours' )
+                    
                 
-                text_components.append( HydrusData.ConvertIntToPrettyString( value ) + ' seconds' )
+                value %= 3600
                 
             
-        
-        text = ' '.join( text_components )
+            if self._show_minutes:
+                
+                minutes = value / 60
+                
+                if minutes > 0:
+                    
+                    text_components.append( HydrusData.ConvertIntToPrettyString( minutes ) + ' minutes' )
+                    
+                
+                value %= 60
+                
+            
+            if self._show_seconds:
+                
+                if value > 0 or len( text_components ) == 0:
+                    
+                    text_components.append( HydrusData.ConvertIntToPrettyString( value ) + ' seconds' )
+                    
+                
+            
+            text = ' '.join( text_components )
+            
         
         self.SetLabelText( text )
         
@@ -3844,7 +3674,7 @@ class TimeDeltaButton( wx.Button ):
         
         import ClientGUIDialogs
         
-        with ClientGUIDialogs.DialogInputTimeDelta( self, self._value, min = self._min, days = self._show_days, hours = self._show_hours, minutes = self._show_minutes, seconds = self._show_seconds ) as dlg:
+        with ClientGUIDialogs.DialogInputTimeDelta( self, self._value, min = self._min, days = self._show_days, hours = self._show_hours, minutes = self._show_minutes, seconds = self._show_seconds, monthly_allowed = self._monthly_allowed ) as dlg:
             
             if dlg.ShowModal() == wx.ID_OK:
                 
@@ -3875,7 +3705,7 @@ class TimeDeltaButton( wx.Button ):
     
 class TimeDeltaCtrl( wx.Panel ):
     
-    def __init__( self, parent, min = 1, days = False, hours = False, minutes = False, seconds = False ):
+    def __init__( self, parent, min = 1, days = False, hours = False, minutes = False, seconds = False, monthly_allowed = False ):
         
         wx.Panel.__init__( self, parent )
         
@@ -3884,13 +3714,14 @@ class TimeDeltaCtrl( wx.Panel ):
         self._show_hours = hours
         self._show_minutes = minutes
         self._show_seconds = seconds
+        self._monthly_allowed = monthly_allowed
         
         hbox = wx.BoxSizer( wx.HORIZONTAL )
         
         if self._show_days:
             
             self._days = wx.SpinCtrl( self, min = 0, max = 360, size = ( 50, -1 ) )
-            self._days.Bind( wx.EVT_SPINCTRL, self.EventSpin )
+            self._days.Bind( wx.EVT_SPINCTRL, self.EventChange )
             
             hbox.AddF( self._days, CC.FLAGS_VCENTER )
             hbox.AddF( wx.StaticText( self, label = 'days' ), CC.FLAGS_VCENTER )
@@ -3899,7 +3730,7 @@ class TimeDeltaCtrl( wx.Panel ):
         if self._show_hours:
             
             self._hours = wx.SpinCtrl( self, min = 0, max = 23, size = ( 45, -1 ) )
-            self._hours.Bind( wx.EVT_SPINCTRL, self.EventSpin )
+            self._hours.Bind( wx.EVT_SPINCTRL, self.EventChange )
             
             hbox.AddF( self._hours, CC.FLAGS_VCENTER )
             hbox.AddF( wx.StaticText( self, label = 'hours' ), CC.FLAGS_VCENTER )
@@ -3908,7 +3739,7 @@ class TimeDeltaCtrl( wx.Panel ):
         if self._show_minutes:
             
             self._minutes = wx.SpinCtrl( self, min = 0, max = 59, size = ( 45, -1 ) )
-            self._minutes.Bind( wx.EVT_SPINCTRL, self.EventSpin )
+            self._minutes.Bind( wx.EVT_SPINCTRL, self.EventChange )
             
             hbox.AddF( self._minutes, CC.FLAGS_VCENTER )
             hbox.AddF( wx.StaticText( self, label = 'minutes' ), CC.FLAGS_VCENTER )
@@ -3917,23 +3748,84 @@ class TimeDeltaCtrl( wx.Panel ):
         if self._show_seconds:
             
             self._seconds = wx.SpinCtrl( self, min = 0, max = 59, size = ( 45, -1 ) )
-            self._seconds.Bind( wx.EVT_SPINCTRL, self.EventSpin )
+            self._seconds.Bind( wx.EVT_SPINCTRL, self.EventChange )
             
             hbox.AddF( self._seconds, CC.FLAGS_VCENTER )
             hbox.AddF( wx.StaticText( self, label = 'seconds' ), CC.FLAGS_VCENTER )
             
         
+        if self._monthly_allowed:
+            
+            self._monthly = wx.CheckBox( self )
+            self._monthly.Bind( wx.EVT_CHECKBOX, self.EventChange )
+            
+            hbox.AddF( self._monthly, CC.FLAGS_VCENTER )
+            hbox.AddF( wx.StaticText( self, label = 'monthly' ), CC.FLAGS_VCENTER )
+            
+        
         self.SetSizer( hbox )
         
     
-    def EventSpin( self, event ):
+    def _UpdateEnables( self ):
         
         value = self.GetValue()
         
-        if value < self._min:
+        if value is None:
+            
+            if self._show_days:
+                
+                self._days.Disable()
+                
+            
+            if self._show_hours:
+                
+                self._hours.Disable()
+                
+            
+            if self._show_minutes:
+                
+                self._minutes.Disable()
+                
+            
+            if self._show_seconds:
+                
+                self._seconds.Disable()
+                
+            
+        else:
+            
+            if self._show_days:
+                
+                self._days.Enable()
+                
+            
+            if self._show_hours:
+                
+                self._hours.Enable()
+                
+            
+            if self._show_minutes:
+                
+                self._minutes.Enable()
+                
+            
+            if self._show_seconds:
+                
+                self._seconds.Enable()
+                
+            
+        
+    
+    def EventChange( self, event ):
+        
+        value = self.GetValue()
+        
+        if value is not None and value < self._min:
             
             self.SetValue( self._min )
             
+        
+        self._UpdateEnables()
         
         new_event = TimeDeltaEvent( 0 )
         
@@ -3941,6 +3833,11 @@ class TimeDeltaCtrl( wx.Panel ):
         
     
     def GetValue( self ):
+        
+        if self._monthly_allowed and self._monthly.GetValue():
+            
+            return None
+            
         
         value = 0
         
@@ -3969,36 +3866,53 @@ class TimeDeltaCtrl( wx.Panel ):
     
     def SetValue( self, value ):
         
-        if value < self._min:
+        if self._monthly_allowed:
             
-            value = self._min
-            
-        
-        if self._show_days:
-            
-            self._days.SetValue( value / 86400 )
-            
-            value %= 86400
-            
-        
-        if self._show_hours:
-            
-            self._hours.SetValue( value / 3600 )
-            
-            value %= 3600
+            if value is None:
+                
+                self._monthly.SetValue( True )
+                
+            else:
+                
+                self._monthly.SetValue( False )
+                
             
         
-        if self._show_minutes:
+        if value is not None:
             
-            self._minutes.SetValue( value / 60 )
+            if value < self._min:
+                
+                value = self._min
+                
             
-            value %= 60
+            if self._show_days:
+                
+                self._days.SetValue( value / 86400 )
+                
+                value %= 86400
+                
+            
+            if self._show_hours:
+                
+                self._hours.SetValue( value / 3600 )
+                
+                value %= 3600
+                
+            
+            if self._show_minutes:
+                
+                self._minutes.SetValue( value / 60 )
+                
+                value %= 60
+                
+            
+            if self._show_seconds:
+                
+                self._seconds.SetValue( value )
+                
             
         
-        if self._show_seconds:
-            
-            self._seconds.SetValue( value )
-            
+        self._UpdateEnables()
         
     
 class RadioBox( StaticBox ):

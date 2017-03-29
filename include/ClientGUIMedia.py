@@ -13,6 +13,7 @@ import ClientGUITopLevelWindows
 import ClientMedia
 import collections
 import HydrusExceptions
+import HydrusNetwork
 import HydrusPaths
 import HydrusSerialisable
 import HydrusTags
@@ -237,13 +238,6 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
             
         
     
-    def _CopyLocalUrlToClipboard( self ):
-        
-        local_url = 'http://127.0.0.1:' + str( HC.options[ 'local_port' ] ) + '/file?hash=' + self._focussed_media.GetDisplayMedia().GetHash().encode( 'hex' )
-        
-        HydrusGlobals.client_controller.pub( 'clipboard', 'text', local_url )
-        
-    
     def _CopyPathToClipboard( self ):
         
         display_media = self._focussed_media.GetDisplayMedia()
@@ -285,7 +279,7 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
         
         if service.GetServiceType() == HC.IPFS:
             
-            multihash_prefix = service.GetInfo( 'multihash_prefix' )
+            multihash_prefix = service.GetMultihashPrefix()
             
             filename = multihash_prefix + filename
             
@@ -301,7 +295,7 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
         
         if service.GetServiceType() == HC.IPFS:
             
-            prefix = service.GetInfo( 'multihash_prefix' )
+            prefix = service.GetMultihashPrefix()
             
         
         hashes = self._GetSelectedHashes( has_location = service_key )
@@ -425,27 +419,37 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
             
             if do_it:
                 
+                def process_in_thread( service_key, content_updates ):
+                    
+                    for content_update in content_updates:
+                        
+                        HydrusGlobals.client_controller.WriteSynchronous( 'content_updates', { service_key : [ content_update ] } )
+                        
+                    
+                
                 local_file_services = ( CC.LOCAL_FILE_SERVICE_KEY, CC.TRASH_SERVICE_KEY )
                 
                 if file_service_key in local_file_services:
+                    
+                    # we want currently animating files (i.e. currently open files) to be unloaded before the delete call goes through
                     
                     if file_service_key == CC.TRASH_SERVICE_KEY:
                         
                         self._SetFocussedMedia( None )
                         
                     
-                    # we want currently animating files (i.e. currently open files) to be unloaded before the delete call goes through
+                    # split them into bits so we don't hang the gui with a huge delete transaction
                     
-                    wx.CallAfter( HydrusGlobals.client_controller.Write, 'content_updates', { file_service_key : [ HydrusData.ContentUpdate( HC.CONTENT_TYPE_FILES, HC.CONTENT_UPDATE_DELETE, hashes ) ] } )
+                    chunks_of_hashes = HydrusData.SplitListIntoChunks( hashes, 64 )
+                    
+                    content_updates = [ HydrusData.ContentUpdate( HC.CONTENT_TYPE_FILES, HC.CONTENT_UPDATE_DELETE, chunk_of_hashes ) for chunk_of_hashes in chunks_of_hashes ]
                     
                 else:
                     
-                    content_update = HydrusData.ContentUpdate( HC.CONTENT_TYPE_FILES, HC.CONTENT_UPDATE_PETITION, ( hashes, 'admin' ) )
+                    content_updates = [ HydrusData.ContentUpdate( HC.CONTENT_TYPE_FILES, HC.CONTENT_UPDATE_PETITION, ( hashes, 'admin' ) ) ]
                     
-                    service_keys_to_content_updates = { file_service_key : ( content_update, ) }
-                    
-                    HydrusGlobals.client_controller.Write( 'content_updates', service_keys_to_content_updates )
-                    
+                
+                HydrusGlobals.client_controller.CallToThread( process_in_thread, file_service_key, content_updates )
                 
             
         
@@ -495,7 +499,7 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
             
             media_show_action = new_options.GetMediaShowAction( display_media.GetMime() )
             
-            if media_show_action == CC.MEDIA_VIEWER_ACTION_DO_NOT_SHOW:
+            if media_show_action == CC.MEDIA_VIEWER_ACTION_DO_NOT_SHOW_ON_ACTIVATION_OPEN_EXTERNALLY:
                 
                 hash = display_media.GetHash()
                 mime = display_media.GetMime()
@@ -505,6 +509,10 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
                 path = client_files_manager.GetFilePath( hash, mime )
                 
                 HydrusPaths.LaunchFile( path )
+                
+                return
+                
+            elif media_show_action == CC.MEDIA_VIEWER_ACTION_DO_NOT_SHOW:
                 
                 return
                 
@@ -875,29 +883,22 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
     
     def _ModifyUploaders( self, file_service_key ):
         
+        wx.MessageBox( 'this does not work yet!' )
+        
+        return
+        
         hashes = self._GetSelectedHashes()
         
         if hashes is not None and len( hashes ) > 0:   
             
-            contents = [ HydrusData.Content( HC.CONTENT_TYPE_FILES, [ hash ] ) for hash in hashes ]
+            contents = [ HydrusNetwork.Content( HC.CONTENT_TYPE_FILES, [ hash ] ) for hash in hashes ]
             
-            subject_identifiers = [ HydrusData.AccountIdentifier( content = content ) for content in contents ]
+            subject_accounts = 'blah' # fetch subjects from server with the contents
             
-            with ClientGUIDialogs.DialogModifyAccounts( self, file_service_key, subject_identifiers ) as dlg: dlg.ShowModal()
+            with ClientGUIDialogs.DialogModifyAccounts( self, file_service_key, subject_accounts ) as dlg: dlg.ShowModal()
             
             self.SetFocus()
             
-        
-    
-    def _NewThreadDumper( self ):
-        
-        # can't do normal _getselectedhashes because we want to keep order!
-        
-        args = [ media.GetHashes( CC.DISCRIMINANT_LOCAL ) for media in self._selected_media ]
-        
-        hashes = [ h for h in itertools.chain( *args ) ]
-        
-        if len( hashes ) > 0: HydrusGlobals.client_controller.pub( 'new_thread_dumper', hashes )
         
     
     def _OpenExternally( self ):
@@ -985,28 +986,6 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
         
         HydrusGlobals.client_controller.pub( 'increment_tags_selection', self._page_key, medias )
         HydrusGlobals.client_controller.pub( 'new_page_status', self._page_key, self._GetPrettyStatus() )
-        
-    
-    def _RatingsFilter( self, service_key ):
-        
-        if service_key is None:
-            
-            service_key = ClientGUIDialogs.SelectServiceKey( service_types = ( HC.LOCAL_RATING_LIKE, HC.LOCAL_RATING_NUMERICAL ) )
-            
-            if service_key is None: return
-            
-        
-        media_results = self.GenerateMediaResults( discriminant = CC.DISCRIMINANT_LOCAL, selected_media = set( self._selected_media ), unrated = service_key )
-        
-        if len( media_results ) > 0:
-            
-            service = HydrusGlobals.client_controller.GetServicesManager().GetService( service_key )
-            
-            if service.GetServiceType() == HC.LOCAL_RATING_LIKE:
-                
-                ClientGUICanvas.RatingsFilterFrameLike( self.GetTopLevelParent(), self._page_key, service_key, media_results )
-                
-            
         
     
     def _RecalculateVirtualSize( self ): pass
@@ -1340,7 +1319,10 @@ class MediaPanel( ClientMedia.ListeningMediaList, wx.ScrolledWindow ):
                 
                 ( action, row ) = service_update.ToTuple()
                 
-                if action in ( HC.SERVICE_UPDATE_DELETE_PENDING, HC.SERVICE_UPDATE_RESET ): self._RecalculateVirtualSize()
+                if action in ( HC.SERVICE_UPDATE_DELETE_PENDING, HC.SERVICE_UPDATE_RESET ):
+                    
+                    self._RecalculateVirtualSize()
+                    
                 
                 self._PublishSelectionChange( force_reload = True )
                 
@@ -2128,7 +2110,6 @@ class MediaPanelThumbnails( MediaPanel ):
             elif command == 'copy_hash': self._CopyHashToClipboard( data )
             elif command == 'copy_hashes': self._CopyHashesToClipboard( data )
             elif command == 'copy_known_urls': self._CopyKnownURLsToClipboard()
-            elif command == 'copy_local_url': self._CopyLocalUrlToClipboard()
             elif command == 'copy_hashes': self._CopyHashesToClipboard( data )
             elif command == 'copy_service_filename': self._CopyServiceFilenameToClipboard( data )
             elif command == 'copy_service_filenames': self._CopyServiceFilenamesToClipboard( data )
@@ -2161,7 +2142,6 @@ class MediaPanelThumbnails( MediaPanel ):
             elif command == 'manage_ratings': self._ManageRatings()
             elif command == 'manage_tags': self._ManageTags()
             elif command == 'modify_account': self._ModifyUploaders( data )
-            elif command == 'new_thread_dumper': self._NewThreadDumper()
             elif command == 'open_externally': self._OpenExternally()
             elif command == 'petition': self._PetitionFiles( data )
             elif command == 'remove': self._Remove()
@@ -2338,7 +2318,7 @@ class MediaPanelThumbnails( MediaPanel ):
             
             if len( self._sorted_media ) > 0:
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
                 
                 select_menu = wx.Menu()
                 
@@ -2408,19 +2388,17 @@ class MediaPanelThumbnails( MediaPanel ):
                 
                 local_booru_service = [ service for service in services if service.GetServiceType() == HC.LOCAL_BOORU ][0]
                 
-                local_booru_is_running = local_booru_service.GetInfo()[ 'port' ] is not None
+                local_booru_is_running = local_booru_service.GetPort() is not None
                 
                 i_can_post_ratings = len( local_ratings_services ) > 0
                 
                 focussed_is_local = CC.LOCAL_FILE_SERVICE_KEY in self._focussed_media.GetLocationsManager().GetCurrent()
                 
                 file_service_keys = { repository.GetServiceKey() for repository in file_repositories }
-                download_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.GetInfo( 'account' ).HasPermission( HC.GET_DATA ) or repository.GetInfo( 'account' ).IsUnknownAccount() }
-                upload_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.GetInfo( 'account' ).HasPermission( HC.POST_DATA ) or repository.GetInfo( 'account' ).IsUnknownAccount() }
-                petition_resolve_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.GetInfo( 'account' ).HasPermission( HC.RESOLVE_PETITIONS ) }
-                petition_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.GetInfo( 'account' ).HasPermission( HC.POST_PETITIONS ) } - petition_resolve_permission_file_service_keys
-                user_manage_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.GetInfo( 'account' ).HasPermission( HC.MANAGE_USERS ) }
-                admin_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.GetInfo( 'account' ).HasPermission( HC.GENERAL_ADMIN ) }
+                upload_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.HasPermission( HC.CONTENT_TYPE_FILES, HC.PERMISSION_ACTION_CREATE ) }
+                petition_resolve_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.HasPermission( HC.CONTENT_TYPE_FILES, HC.PERMISSION_ACTION_OVERRULE ) }
+                petition_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.HasPermission( HC.CONTENT_TYPE_FILES, HC.PERMISSION_ACTION_PETITION ) } - petition_resolve_permission_file_service_keys
+                user_manage_permission_file_service_keys = { repository.GetServiceKey() for repository in file_repositories if repository.HasPermission( HC.CONTENT_TYPE_ACCOUNTS, HC.PERMISSION_ACTION_OVERRULE ) }
                 ipfs_service_keys = { service.GetServiceKey() for service in ipfs_services }
                 
                 focussed_is_ipfs = True in ( service_key in ipfs_service_keys for service_key in self._focussed_media.GetLocationsManager().GetCurrentRemote() )
@@ -2552,18 +2530,18 @@ class MediaPanelThumbnails( MediaPanel ):
                     
                     # FILE REPOS
                     
-                    # we can upload (set pending) to a repo_id when we have permission, a file is local, not current, not pending, and either ( not deleted or admin )
+                    # we can upload (set pending) to a repo_id when we have permission, a file is local, not current, not pending, and either ( not deleted or we_can_overrule )
                     
                     if locations_manager.IsLocal():
                         
-                        uploadable_file_service_keys.update( upload_permission_file_service_keys - locations_manager.GetCurrentRemote() - locations_manager.GetPendingRemote() - ( locations_manager.GetDeletedRemote() - admin_permission_file_service_keys ) )
+                        uploadable_file_service_keys.update( upload_permission_file_service_keys - locations_manager.GetCurrentRemote() - locations_manager.GetPendingRemote() - ( locations_manager.GetDeletedRemote() - petition_resolve_permission_file_service_keys ) )
                         
                     
                     # we can download (set pending to local) when we have permission, a file is not local and not already downloading and current
                     
                     if not locations_manager.IsLocal() and not locations_manager.IsDownloading():
                         
-                        downloadable_file_service_keys.update( download_permission_file_service_keys & locations_manager.GetCurrentRemote() )
+                        downloadable_file_service_keys.update( file_service_keys & locations_manager.GetCurrentRemote() )
                         
                     
                     # we can petition when we have permission and a file is current and it is not already petitioned
@@ -2676,7 +2654,7 @@ class MediaPanelThumbnails( MediaPanel ):
                     AddServiceKeyLabelsToMenu( menu, common_petitioned_ipfs_service_keys, unpin_phrase )
                     
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
                 
                 #
                 
@@ -2815,7 +2793,7 @@ class MediaPanelThumbnails( MediaPanel ):
                         
                         ClientGUIMenus.AppendMenuItem( self, custom_shortcuts_menu, 'manage', 'Manage your different custom filters and their shortcuts.', self._CustomFilter )
                         
-                        custom_shortcuts_menu.AppendSeparator()
+                        ClientGUIMenus.AppendSeparator( custom_shortcuts_menu )
                         
                         for shortcut_name in shortcut_names:
                             
@@ -2832,7 +2810,7 @@ class MediaPanelThumbnails( MediaPanel ):
                     ClientGUIMenus.AppendMenu( menu, filter_menu, 'filter' )
                     
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
                 
                 if selection_has_inbox:
                     
@@ -2859,7 +2837,7 @@ class MediaPanelThumbnails( MediaPanel ):
                 
                 # share
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
                 
                 if selection_has_local:
                     
@@ -2939,14 +2917,6 @@ class MediaPanelThumbnails( MediaPanel ):
                     ClientGUIMenus.AppendMenuItem( self, copy_menu, 'paths', 'Copy the selected files\' paths to the clipboard.', self._CopyPathsToClipboard )
                     
                 
-                if focussed_is_local:
-                    
-                    if HC.options[ 'local_port' ] is not None:
-                        
-                        ClientGUIMenus.AppendMenuItem( self, copy_menu, 'local url', 'Copy the selected file\'s local (client-hosted) url to the clipboard.', self._CopyLocalUrlToClipboard )
-                        
-                    
-                
                 ClientGUIMenus.AppendMenuItem( self, copy_menu, 'known urls (prototype)', 'Copy the selected file\'s known urls to the clipboard.', self._CopyKnownURLsToClipboard )
                 
                 ClientGUIMenus.AppendMenu( share_menu, copy_menu, 'copy' )
@@ -2973,13 +2943,13 @@ class MediaPanelThumbnails( MediaPanel ):
                 
                 #
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
                 
                 ClientGUIMenus.AppendMenuItem( self, menu, 'refresh', 'Refresh the current search.', HydrusGlobals.client_controller.pub, 'refresh_query', self._page_key )
                 
+                ClientGUIMenus.AppendSeparator( menu )
+                
                 if len( self._sorted_media ) > 0:
-                    
-                    menu.AppendSeparator()
                     
                     select_menu = wx.Menu()
                     
@@ -3023,13 +2993,13 @@ class MediaPanelThumbnails( MediaPanel ):
                     ClientGUIMenus.AppendMenu( menu, select_menu, 'select' )
                     
                 
-                menu.AppendSeparator()
+                ClientGUIMenus.AppendSeparator( menu )
                 
                 ClientGUIMenus.AppendMenuItem( self, menu, 'open selection in a new page', 'Copy your current selection into a simple new page.', self._ShowSelectionInNewQueryPage )
                 
                 if self._focussed_media.HasImages():
                     
-                    menu.AppendSeparator()
+                    ClientGUIMenus.AppendSeparator( menu )
                     
                     similar_menu = wx.Menu()
                     

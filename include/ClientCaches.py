@@ -1,6 +1,5 @@
 import ClientDefaults
 import ClientDownloading
-import ClientFiles
 import ClientNetworking
 import ClientRendering
 import ClientSearch
@@ -8,16 +7,13 @@ import ClientThreading
 import HydrusConstants as HC
 import HydrusExceptions
 import HydrusFileHandling
-import HydrusImageHandling
 import HydrusPaths
 import HydrusSessions
 import itertools
 import json
 import os
 import random
-import Queue
 import requests
-import shutil
 import threading
 import time
 import urllib
@@ -588,6 +584,16 @@ class ClientFilesManager( object ):
             
         
     
+    def LocklessAddFileFromString( self, hash, mime, data ):
+        
+        dest_path = self._GenerateExpectedFilePath( hash, mime )
+        
+        with open( dest_path, 'wb' ) as f:
+            
+            f.write( data )
+            
+        
+    
     def LocklessAddFile( self, hash, mime, source_path ):
         
         dest_path = self._GenerateExpectedFilePath( hash, mime )
@@ -944,14 +950,11 @@ class ClientFilesManager( object ):
             
         
     
-    def HaveFullSizeThumbnail( self, hash ):
+    def LocklessHasFullSizeThumbnail( self, hash ):
         
-        with self._lock:
-            
-            path = self._GenerateExpectedFullSizeThumbnailPath( hash )
-            
-            return os.path.exists( path )
-            
+        path = self._GenerateExpectedFullSizeThumbnailPath( hash )
+        
+        return os.path.exists( path )
         
     
     def Rebalance( self, partial = True, stop_time = None ):
@@ -1085,7 +1088,14 @@ class ClientFilesManager( object ):
                     
                     ( base, filename ) = os.path.split( path )
                     
-                    ( hash_encoded, ext ) = filename.split( '.', 1 )
+                    if '.' in filename:
+                        
+                        ( hash_encoded, ext ) = filename.split( '.', 1 )
+                        
+                    else:
+                        
+                        continue # it is an update file, so let's save us some ffmpeg lag and logspam
+                        
                     
                     hash = hash_encoded.decode( 'hex' )
                     
@@ -1300,12 +1310,10 @@ class LocalBooruCache( object ):
     
     def _CheckDataUsage( self ):
         
-        info = self._local_booru_service.GetInfo()
-        
-        max_monthly_data = info[ 'max_monthly_data' ]
-        used_monthly_data = info[ 'used_monthly_data' ]
-        
-        if max_monthly_data is not None and used_monthly_data > max_monthly_data: raise HydrusExceptions.ForbiddenException( 'This booru has used all its monthly data. Please try again next month.' )
+        if not self._local_booru_service.BandwidthOk():
+            
+            raise HydrusExceptions.ForbiddenException( 'This booru has used all its monthly data. Please try again next month.' )
+            
         
     
     def _CheckFileAuthorised( self, share_key, hash ):
@@ -1974,11 +1982,29 @@ class ServicesManager( object ):
             
         
     
+    def _SetServices( self, services ):
+        
+        self._keys_to_services = { service.GetServiceKey() : service for service in services }
+        
+        def compare_function( a, b ):
+            
+            return cmp( a.GetName(), b.GetName() )
+            
+        
+        self._services_sorted = list( services )
+        self._services_sorted.sort( cmp = compare_function )
+        
+    
     def Filter( self, service_keys, desired_types ):
         
         with self._lock:
             
-            filtered_service_keys = [ service_key for service_key in service_keys if self._keys_to_services[ service_key ].GetServiceType() in desired_types ]
+            def func( service_key ):
+                
+                return self._keys_to_services[ service_key ].GetServiceType() in desired_types
+                
+            
+            filtered_service_keys = filter( func, service_keys )
             
             return filtered_service_keys
             
@@ -1988,7 +2014,12 @@ class ServicesManager( object ):
         
         with self._lock:
             
-            filtered_service_keys = [ service_key for service_key in service_keys if service_key in self._keys_to_services ]
+            def func( service_key ):
+                
+                return service_key in self._keys_to_services
+                
+            
+            filtered_service_keys = filter( func, service_keys )
             
             return filtered_service_keys
             
@@ -2026,7 +2057,12 @@ class ServicesManager( object ):
         
         with self._lock:
             
-            services = [ service for service in self._services_sorted if service.GetServiceType() in desired_types ]
+            def func( service ):
+                
+                return service.GetServiceType() in desired_types
+                
+            
+            services = filter( func, self._services_sorted )
             
             if randomised:
                 
@@ -2043,14 +2079,8 @@ class ServicesManager( object ):
             
             services = self._controller.Read( 'services' )
             
-            self._keys_to_services = { service.GetServiceKey() : service for service in services }
+            self._SetServices( services )
             
-            compare_function = lambda a, b: cmp( a.GetName(), b.GetName() )
-            
-            self._services_sorted = list( services )
-            self._services_sorted.sort( cmp = compare_function )
-            
-        
     
     def ServiceExists( self, service_key ):
         
@@ -2239,7 +2269,7 @@ class TagParentsManager( object ):
         
         for ( service_key, statuses_to_pairs ) in collapsed_service_keys_to_statuses_to_pairs.items():
             
-            pairs_flat = statuses_to_pairs[ HC.CURRENT ].union( statuses_to_pairs[ HC.PENDING ] )
+            pairs_flat = statuses_to_pairs[ HC.CONTENT_STATUS_CURRENT ].union( statuses_to_pairs[ HC.CONTENT_STATUS_PENDING ] )
             
             service_keys_to_pairs_flat[ service_key ] = pairs_flat
             
@@ -2377,7 +2407,7 @@ class TagSiblingsManager( object ):
         
         for ( service_key, statuses_to_pairs ) in service_keys_to_statuses_to_pairs.items():
             
-            all_pairs = statuses_to_pairs[ HC.CURRENT ].union( statuses_to_pairs[ HC.PENDING ] )
+            all_pairs = statuses_to_pairs[ HC.CONTENT_STATUS_CURRENT ].union( statuses_to_pairs[ HC.CONTENT_STATUS_PENDING ] )
             
             combined_pairs.update( all_pairs )
             
@@ -2435,11 +2465,11 @@ class TagSiblingsManager( object ):
                 
             else:
                 
-                matching_keys = ClientSearch.FilterTagsBySearchEntry( service_key, search_text, siblings.keys(), search_siblings = False )
+                matching_keys = ClientSearch.FilterTagsBySearchText( service_key, search_text, siblings.keys(), search_siblings = False )
                 
                 key_based_matching_values = { siblings[ key ] for key in matching_keys }
                 
-                value_based_matching_values = ClientSearch.FilterTagsBySearchEntry( service_key, search_text, siblings.values(), search_siblings = False )
+                value_based_matching_values = ClientSearch.FilterTagsBySearchText( service_key, search_text, siblings.values(), search_siblings = False )
                 
             
             matching_values = key_based_matching_values.union( value_based_matching_values )
